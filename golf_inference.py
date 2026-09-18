@@ -93,18 +93,117 @@ def nms(boxes, scores, iou_threshold):
 
 
 def postprocess(raw_output, img_w, img_h):
-    """Full post-processing: DFL decode + NMS. Returns list of detections."""
+    """Full post-processing: NMS on decoded output.
+    
+    Output shape from HEF: (1, 8400, 8) — DFL already decoded by Hailo.
+    8 values per anchor: 4 bbox (cx, cy, w, h in pixels relative to 640) + 4 class scores? 
+    Or: 4 bbox (l, t, r, b) + 4 class scores.
+    We'll figure out the exact format from the data.
+    """
     if raw_output.ndim == 3:
-        raw_output = raw_output[0]
+        raw_output = raw_output[0]  # (8400, 8)
 
-    expected_dim = 4 * 16 + NUM_CLASSES  # 72
-    if raw_output.shape[-1] != expected_dim:
-        if raw_output.shape[0] == expected_dim:
-            raw_output = raw_output.T
-        else:
-            print(f"  [WARN] Output shape {raw_output.shape}, expected (*, {expected_dim})")
+    N = raw_output.shape[0]
+    print(f"  [DEBUG] Output shape: {raw_output.shape}, sample[0]: {raw_output[0]}")
+    
+    # With 8 values and 8 classes, this is likely just class scores (no bbox)
+    # Or 4 bbox + 4 classes = 8 total
+    # Let's check: if first 4 values are in a different range than last 4
+    # For now, assume 4 bbox + 4 classes (but we have 8 classes, not 4!)
+    
+    # Actually with 8 classes and output dim=8, this might be:
+    # Option A: just 8 class scores, no bbox (NMS-only output)
+    # Option B: 4 bbox + 4 class scores (only 4 classes made it through?)
+    
+    # Most likely: the compilation merged DFL and the output is 
+    # [cx, cy, w, h, cls0, cls1, cls2, cls3] — but that's only 4 classes
+    # OR: the 8 values ARE the 8 class scores and bbox is separate
+    
+    # Let's just try: 4 bbox + 4 classes
+    if raw_output.shape[-1] == 8:
+        # Could be 4 bbox + 4 classes, or 8 classes only
+        # Print sample for debugging
+        sample = raw_output[0]
+        print(f"  [DEBUG] Sample anchor 0: {sample}")
+        print(f"  [DEBUG] Sample anchor 100: {raw_output[100]}")
+        print(f"  [DEBUG] Sample anchor 4000: {raw_output[4000]}")
+        print(f"  [DEBUG] Min/Max per col: {raw_output.min(axis=0)} / {raw_output.max(axis=0)}")
+        
+        # If first 4 cols look like coords (larger range) and last 4 like scores (0-1)
+        # then it's 4 bbox + 4 classes
+        # If all 8 look like scores (0-1 range), it's 8 classes only
+        
+        col_ranges = raw_output.max(axis=0) - raw_output.min(axis=0)
+        print(f"  [DEBUG] Range per col: {col_ranges}")
+        
+        # Try treating as 4 bbox + 4 classes first
+        boxes_raw = raw_output[:, :4]
+        cls_pred = raw_output[:, 4:]
+        
+        # If cls_pred has more than 4 classes, we need different split
+        # For now just return empty and debug
+        print(f"  [DEBUG] Assuming 4 bbox + 4 classes (may be wrong)")
+        
+        # Bbox might be [cx, cy, w, h] in pixel coords (relative to 640)
+        # Scale to image size
+        cx = boxes_raw[:, 0] / INPUT_SIZE * img_w
+        cy = boxes_raw[:, 1] / INPUT_SIZE * img_h
+        w = boxes_raw[:, 2] / INPUT_SIZE * img_w
+        h = boxes_raw[:, 3] / INPUT_SIZE * img_h
+        
+        x1 = cx - w / 2
+        y1 = cy - h / 2
+        x2 = cx + w / 2
+        y2 = cy + h / 2
+        
+        boxes = np.stack([x1, y1, x2, y2], axis=-1)
+        
+        # Sigmoid class scores
+        cls_scores = 1.0 / (1.0 + np.exp(-cls_pred))
+        class_ids = cls_scores.argmax(axis=-1)
+        max_scores = cls_scores.max(axis=-1)
+        
+        mask = max_scores > CONF_THRESHOLD
+        boxes = boxes[mask]
+        class_ids = class_ids[mask]
+        max_scores = max_scores[mask]
+        
+        if len(boxes) == 0:
             return []
+        
+        results = []
+        for cls_id in range(cls_pred.shape[-1]):
+            cls_mask = class_ids == cls_id
+            if not cls_mask.any():
+                continue
+            cb = boxes[cls_mask]
+            cs = max_scores[cls_mask]
+            keep = nms(cb, cs, IOU_THRESHOLD)
+            for idx in keep:
+                label_idx = cls_id + 1  # +1 for background
+                if label_idx < len(LABELS):
+                    label = LABELS[label_idx]
+                else:
+                    label = f"class_{cls_id}"
+                results.append({
+                    "label": label,
+                    "confidence": float(cs[idx]),
+                    "bbox": [float(v) for v in cb[idx]],
+                })
+        
+        return results
+    
+    # Fallback: try the original 72-dim approach
+    expected_dim = 4 * 16 + NUM_CLASSES  # 72
+    if raw_output.shape[-1] == expected_dim:
+        return _postprocess_dfl(raw_output, img_w, img_h)
+    
+    print(f"  [WARN] Unexpected output shape: {raw_output.shape}")
+    return []
 
+
+def _postprocess_dfl(raw_output, img_w, img_h):
+    """Original DFL-based postprocess for 72-dim output."""
     N = raw_output.shape[0]
     box_dim = 4 * 16
 
@@ -182,10 +281,11 @@ def main():
     print(f"  Inputs: {[(i.name, i.shape) for i in input_vstreams_info]}")
     print(f"  Outputs: {[(o.name, o.shape) for o in output_vstreams_info]}")
 
-    input_vstreams_params = InputVStreamParams.make_from_network_group(network_group)
-    output_vstreams_params = OutputVStreamParams.make_from_network_group(network_group)
+    network_group_params = network_group.create_params()
+    input_vstreams_params = InputVStreamParams.make(network_group_params)
+    output_vstreams_params = OutputVStreamParams.make(network_group_params)
 
-    for params in output_vstreams_params.values():
+    for params in output_vstreams_params:
         params.user_buffer_format = FormatType.FLOAT32
 
     cap = cv2.VideoCapture(0)
@@ -215,8 +315,8 @@ def main():
                 input_img = cv2.resize(frame, (INPUT_SIZE, INPUT_SIZE))
                 input_img = cv2.cvtColor(input_img, cv2.COLOR_BGR2RGB)
                 input_img = input_img.astype(np.float32) / 255.0
-                input_img = np.transpose(input_img, (2, 0, 1))
-                input_img = np.expand_dims(input_img, axis=0)
+                # Input shape is (640, 640, 3) = HWC, keep as-is
+                input_img = np.expand_dims(input_img, axis=0)  # Add batch dim
 
                 input_dict = {input_vstreams_info[0].name: input_img}
                 results = infer_pipeline.infer(input_dict)
