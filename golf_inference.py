@@ -273,7 +273,8 @@ def main():
     target = VDevice()
 
     configure_params = ConfigureParams.create_from_hef(hef, interface=HailoStreamInterface.PCIe)
-    network_group = target.configure(hef, configure_params)
+    network_groups = target.configure(hef, configure_params)
+    network_group = network_groups[0]
 
     input_vstreams_info = hef.get_input_vstream_infos()
     output_vstreams_info = hef.get_output_vstream_infos()
