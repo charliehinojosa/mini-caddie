@@ -1,11 +1,13 @@
-[
-  "background",
-  "golf_ball",
-  "golf_club",
-  "golf_club_head",
-  "golf_hole",
-  "golf_mat",
-  "person",
-  "player_not_ready",
-  "player_ready"
-]
+{
+  "labels": [
+    "background",
+    "golf_ball",
+    "golf_club",
+    "golf_club_head",
+    "golf_hole",
+    "golf_mat",
+    "person",
+    "player_not_ready",
+    "player_ready"
+  ]
+}
