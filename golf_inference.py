@@ -282,11 +282,10 @@ def main():
     print(f"  Inputs: {[(i.name, i.shape) for i in input_vstreams_info]}")
     print(f"  Outputs: {[(o.name, o.shape) for o in output_vstreams_info]}")
 
-    network_group_params = network_group.create_params()
-    input_vstreams_params = InputVStreamParams.make(network_group_params)
-    output_vstreams_params = OutputVStreamParams.make(network_group_params)
+    input_vstreams_params = InputVStreamParams.make(network_group)
+    output_vstreams_params = OutputVStreamParams.make(network_group)
 
-    for params in output_vstreams_params:
+    for params in output_vstreams_params.values():
         params.user_buffer_format = FormatType.FLOAT32
 
     cap = cv2.VideoCapture(0)
