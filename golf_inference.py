@@ -286,7 +286,7 @@ def main():
     output_vstreams_params = OutputVStreamParams.make(network_group)
 
     for params in output_vstreams_params.values():
-        params.user_buffer_format = FormatType.FLOAT32
+        params.format_type = FormatType.FLOAT32
 
     cap = cv2.VideoCapture(0)
     if not cap.isOpened():
