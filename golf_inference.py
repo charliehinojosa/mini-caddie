@@ -22,7 +22,7 @@ from hailo_platform import (
     InferVStreams,
     ConfigureParams,
     FormatType,
-    HailoStream,
+    HailoStreamInterface,
     InputVStreamParams,
     OutputVStreamParams,
 )
@@ -173,7 +173,7 @@ def main():
     hef = HEF(hef_path)
     target = VDevice()
 
-    configure_params = ConfigureParams.create_from_hef(hef, interface=HailoStream.ACCELERATOR)
+    configure_params = ConfigureParams.create_from_hef(hef, interface=HailoStreamInterface.PCIe)
     network_group = target.configure(hef, configure_params)
 
     input_vstreams_info = hef.get_input_vstream_infos()
