@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-Mini Caddie — Golf Inference DEBUG (WORKING API)
-Approach 1: make_from_network_group(ng) ✅
-InferVStreams order: (ng, input_params, output_params, target) — ng has .name
+Mini Caddie — Golf Inference DEBUG (WORKING — final fix)
+InferVStreams(ng, inp, out, target) ✅
+Input dtype: uint8 (NOT float32)
 """
 import os
 import numpy as np
@@ -31,106 +31,110 @@ print(f"📤 Outputs: {[(o.name, o.shape) for o in output_info]}")
 inp_params = InputVStreamParams.make_from_network_group(ng)
 out_params = OutputVStreamParams.make_from_network_group(ng)
 
-# Set output format to FLOAT32 — output is a DICT, use .values()
-# user_buffer_format needs HailoFormat, not FormatType
-try:
-    from hailo_platform import HailoFormat
-    for p in out_params.values():
-        p.user_buffer_format = HailoFormat(
-            FormatType.FLOAT32
-        )
-except ImportError:
-    # Skip — use default format
-    print("  (HailoFormat not available, using default output format)")
+# Skip setting output format — use default
 
-# Test image
-test_img = np.zeros((1, INPUT_SIZE, INPUT_SIZE, 3), dtype=np.float32)
+# Test image: uint8, HWC, RGB
+test_img = np.zeros((1, INPUT_SIZE, INPUT_SIZE, 3), dtype=np.uint8)
 for y in range(INPUT_SIZE):
     for x in range(INPUT_SIZE):
-        test_img[0, y, x, 0] = x / INPUT_SIZE
-        test_img[0, y, x, 1] = y / INPUT_SIZE
-        test_img[0, y, x, 2] = 0.5
+        test_img[0, y, x, 0] = int(x / INPUT_SIZE * 255)
+        test_img[0, y, x, 1] = int(y / INPUT_SIZE * 255)
+        test_img[0, y, x, 2] = 128
 
-print(f"\n🖼️ Test input: {test_img.shape}")
-
-# Try different InferVStreams argument orders
-orders = [
-    ("ng, inp, out, target", lambda: InferVStreams(ng, inp_params, out_params, target)),
-    ("ng, inp, out, target, ng", lambda: InferVStreams(ng, inp_params, out_params, target, ng)),
-    ("target, ng, inp, out", lambda: InferVStreams(target, ng, inp_params, out_params)),
-]
+print(f"\n🖼️ Test input: {test_img.shape}, dtype: {test_img.dtype}")
 
 activated = ng.activate()
 with activated:
-    for label, factory in orders:
-        print(f"\n--- Trying InferVStreams({label}) ---")
-        try:
-            with factory() as pipeline:
-                input_dict = {input_info[0].name: test_img}
-                results = pipeline.infer(input_dict)
-                out_name = output_info[0].name
-                raw = results[out_name]
+    with InferVStreams(ng, inp_params, out_params, target) as pipeline:
+        # Run 1: test gradient
+        print("\n🧠 Inference on test gradient...")
+        input_dict = {input_info[0].name: test_img}
+        results = pipeline.infer(input_dict)
 
-                flat = raw[0] if raw.ndim == 3 else raw
-                N, D = flat.shape
+        out_name = output_info[0].name
+        raw = results[out_name]
 
-                print(f"✅✅✅ INFERENCE WORKED!")
-                print(f"   Output shape: {raw.shape}, dtype: {raw.dtype}")
-                print(f"   Flat: ({N}, {D})")
-                print(f"\n   Per-col min: {flat.min(axis=0)}")
-                print(f"   Per-col max: {flat.max(axis=0)}")
-                print(f"   Per-col mean: {flat.mean(axis=0)}")
-                print(f"   Per-col std: {flat.std(axis=0)}")
-                print(f"\n   Sample[0]: {flat[0]}")
-                print(f"   Sample[100]: {flat[100]}")
-                print(f"   Sample[4000]: {flat[4000]}")
-                print(f"   Sample[8399]: {flat[8399]}")
+        print(f"\n{'='*60}")
+        print(f"📊 RAW OUTPUT (test image)")
+        print(f"{'='*60}")
+        print(f"  Type: {type(raw)}")
+        print(f"  Shape: {raw.shape}")
+        print(f"  Dtype: {raw.dtype}")
 
-                # Camera frame
-                print(f"\n📷 Camera frame...")
-                cap = cv2.VideoCapture(0)
-                if cap.isOpened():
-                    ret, frame = cap.read()
-                    if ret:
-                        img_h, img_w = frame.shape[:2]
-                        inp = cv2.resize(frame, (INPUT_SIZE, INPUT_SIZE))
-                        inp = cv2.cvtColor(inp, cv2.COLOR_BGR2RGB)
-                        inp = inp.astype(np.float32) / 255.0
-                        inp = np.expand_dims(inp, axis=0)
+        # Handle any number of dims
+        flat = np.array(raw)
+        while flat.ndim > 2:
+            flat = flat[0] if flat.shape[0] == 1 else flat.reshape(-1, flat.shape[-1])
 
-                        cam_results = pipeline.infer({input_info[0].name: inp})
-                        cam_raw = cam_results[out_name]
-                        cam_flat = cam_raw[0] if cam_raw.ndim == 3 else cam_raw
+        N, D = flat.shape
+        print(f"  Flat: ({N}, {D})")
 
-                        print(f"   Camera output: {cam_raw.shape}")
-                        print(f"\n   Per-col min: {cam_flat.min(axis=0)}")
-                        print(f"   Per-col max: {cam_flat.max(axis=0)}")
-                        print(f"   Per-col mean: {cam_flat.mean(axis=0)}")
-                        print(f"   Per-col std: {cam_flat.std(axis=0)}")
+        print(f"\n📈 Per-column stats:")
+        print(f"  {'col':>4}  {'min':>10}  {'max':>10}  {'mean':>10}  {'std':>10}")
+        for col in range(D):
+            c = flat[:, col]
+            print(f"  {col:4d}  {c.min():10.4f}  {c.max():10.4f}  {c.mean():10.4f}  {c.std():10.4f}")
 
-                        # Top 10 anchors
-                        max_vals = cam_flat.max(axis=-1)
-                        top10 = max_vals.argsort()[-10:][::-1]
-                        print(f"\n   Top 10 anchors:")
-                        for idx in top10:
-                            print(f"   [{idx:4d}]: max={max_vals[idx]:.4f}  vals={cam_flat[idx]}")
+        print(f"\n🔢 Samples:")
+        for i in [0, 1, 100, 1000, 4000, 8000, 8399]:
+            if i < N:
+                print(f"  [{i:4d}]: {flat[i]}")
 
-                        # Top 5 per column
-                        print(f"\n   Top 5 per column:")
-                        for col in range(D):
-                            top5 = cam_flat[:, col].argsort()[-5:][::-1]
-                            vals = " ".join(f"[{i}:{cam_flat[i,col]:.3f}]" for i in top5)
-                            print(f"   col {col}: {vals}")
-                    else:
-                        print("   ❌ Camera read failed")
-                    cap.release()
-                else:
-                    print("   ⚠️ No camera")
+        print(f"\n🔬 Analysis:")
+        print(f"  All in [0,1]?  {bool((flat >= 0).all() and (flat <= 1).all())}")
+        print(f"  Any > 1?       {bool((flat > 1).any())}")
+        print(f"  Any > 10?      {bool((flat > 10).any())}")
+        print(f"  Any > 640?     {bool((flat > 640).any())}")
+        print(f"  Any negative?  {bool((flat < 0).any())}")
 
-                print(f"\n✅ Debug complete! Send this output to Caddie.")
-                break  # Don't try other orders if one works
-        except Exception as e:
-            print(f"❌ Failed: {e}")
-            import traceback
-            traceback.print_exc()
-            continue
+        # Run 2: camera
+        print(f"\n{'='*60}")
+        print(f"📷 Camera frame")
+        print(f"{'='*60}")
+        cap = cv2.VideoCapture(0)
+        if cap.isOpened():
+            ret, frame = cap.read()
+            if ret:
+                print(f"  Camera: {frame.shape}")
+                inp = cv2.resize(frame, (INPUT_SIZE, INPUT_SIZE))
+                inp = cv2.cvtColor(inp, cv2.COLOR_BGR2RGB)
+                inp = np.expand_dims(inp, axis=0)  # keep uint8
+
+                cam_results = pipeline.infer({input_info[0].name: inp})
+                cam_raw = cam_results[out_name]
+                cam_flat = np.array(cam_raw)
+                while cam_flat.ndim > 2:
+                    cam_flat = cam_flat[0] if cam_flat.shape[0] == 1 else cam_flat.reshape(-1, cam_flat.shape[-1])
+
+                print(f"  Output shape: {cam_raw.shape}")
+                print(f"  Flat: {cam_flat.shape}")
+
+                print(f"\n  Per-col stats:")
+                print(f"  {'col':>4}  {'min':>10}  {'max':>10}  {'mean':>10}  {'std':>10}")
+                for col in range(cam_flat.shape[-1]):
+                    c = cam_flat[:, col]
+                    print(f"  {col:4d}  {c.min():10.4f}  {c.max():10.4f}  {c.mean():10.4f}  {c.std():10.4f}")
+
+                # Top 10 anchors
+                max_vals = cam_flat.max(axis=-1)
+                top10 = max_vals.argsort()[-10:][::-1]
+                print(f"\n  Top 10 anchors by max value:")
+                for idx in top10:
+                    print(f"  [{idx:4d}]: max={max_vals[idx]:.4f}  vals={cam_flat[idx]}")
+
+                # Top 5 per column
+                D2 = cam_flat.shape[-1]
+                print(f"\n  Top 5 per column:")
+                for col in range(D2):
+                    top5 = cam_flat[:, col].argsort()[-5:][::-1]
+                    vals = " ".join(f"[{i}:{cam_flat[i,col]:.3f}]" for i in top5)
+                    print(f"  col {col}: {vals}")
+            else:
+                print("  ❌ Camera read failed")
+            cap.release()
+        else:
+            print("  ⚠️ No camera")
+
+print(f"\n{'='*60}")
+print("✅ Debug complete! Send this to Caddie.")
+print("=" * 60)
