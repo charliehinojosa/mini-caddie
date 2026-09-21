@@ -32,8 +32,16 @@ inp_params = InputVStreamParams.make_from_network_group(ng)
 out_params = OutputVStreamParams.make_from_network_group(ng)
 
 # Set output format to FLOAT32 — output is a DICT, use .values()
-for p in out_params.values():
-    p.user_buffer_format = FormatType.FLOAT32
+# user_buffer_format needs HailoFormat, not FormatType
+try:
+    from hailo_platform import HailoFormat
+    for p in out_params.values():
+        p.user_buffer_format = HailoFormat(
+            FormatType.FLOAT32
+        )
+except ImportError:
+    # Skip — use default format
+    print("  (HailoFormat not available, using default output format)")
 
 # Test image
 test_img = np.zeros((1, INPUT_SIZE, INPUT_SIZE, 3), dtype=np.float32)
