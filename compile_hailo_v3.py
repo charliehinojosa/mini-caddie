@@ -75,7 +75,6 @@ print("NMS config written!")
 alls_script = (
     'normalization1 = normalization([0.0, 0.0, 0.0], [255.0, 255.0, 255.0])\n'
     'nms_postprocess("' + nms_config_path + '", meta_arch=yolov8, engine=cpu)\n'
-    'allocator_param(width_splitter_defuse=disabled, spatial_defuse_legacy=True)\n'
 )
 
 alls_path = '/content/mini_caddie_golf.alls'
