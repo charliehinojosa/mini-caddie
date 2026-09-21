@@ -68,11 +68,12 @@ def main():
 
     print(f"\n🖼️  Test input shape: {test_img.shape}")
 
-    # Create vstream params INSIDE the network_group context
-    # InputVStreamParams.make() expects the activated network group
-    with network_group:
-        input_vstreams_params = InputVStreamParams.make(network_group)
-        output_vstreams_params = OutputVStreamParams.make(network_group)
+    # Create vstream params — need ActivatedNetworkGroup
+    # ConfiguredNetwork.activate() returns ActivatedNetworkGroup
+    activated = network_group.activate()
+    with activated:
+        input_vstreams_params = InputVStreamParams.make(activated)
+        output_vstreams_params = OutputVStreamParams.make(activated)
 
         # Set output to FLOAT32 — try both attr names
         for params in output_vstreams_params:
@@ -82,7 +83,7 @@ def main():
                 params.user_buffer_format = FormatType.FLOAT32
 
         with InferVStreams(
-            target, network_group, input_vstreams_params, output_vstreams_params
+            target, activated, input_vstreams_params, output_vstreams_params
         ) as infer_pipeline:
 
             # ── Run 1: Test gradient image ──
