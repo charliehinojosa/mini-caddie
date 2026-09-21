@@ -93,8 +93,39 @@ runner.load_model_script(alls_path)
 print("Model script loaded!")
 
 # --- 5. Load calibration images ---
-calib_dir = '/content/dataset/unified/valid/images'
+# Try multiple possible paths
+calib_dirs = [
+    '/content/dataset/unified/valid/images',
+    '/content/dataset/unified/images/val',
+    '/content/dataset/valid/images',
+    '/content/dataset/images',
+]
+calib_dir = None
+for d in calib_dirs:
+    if os.path.isdir(d):
+        calib_dir = d
+        break
+
+if calib_dir is None:
+    # Search for any images directory
+    import subprocess
+    result = subprocess.run(['find', '/content/dataset', '-name', '*.jpg', '-print0'],
+                          capture_output=True, text=True)
+    if result.stdout:
+        all_imgs = result.stdout.strip('\0').split('\0')
+        if all_imgs:
+            calib_dir = os.path.dirname(all_imgs[0])
+            print(f"Found images at: {calib_dir}")
+
+if calib_dir is None:
+    print("ERROR: No calibration images found! Check dataset path.")
+    print("Contents of /content/:")
+    for item in os.listdir('/content'):
+        print(f"  {item}")
+    exit(1)
+
 calib_files = sorted(glob.glob(os.path.join(calib_dir, '*.jpg')))[:100]
+print(f"Calibration dir: {calib_dir}")
 print(f"Found {len(calib_files)} calibration images")
 
 def preprocess(file):
