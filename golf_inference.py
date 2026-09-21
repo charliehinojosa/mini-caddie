@@ -54,11 +54,11 @@ def main():
 
     print(f"\n📥 Inputs:")
     for i in input_vstreams_info:
-        print(f"  {i.name}: shape={i.shape}, dtype={i.format_type}")
+        print(f"  {i.name}: shape={i.shape}")
 
     print(f"\n📤 Outputs:")
     for o in output_vstreams_info:
-        print(f"  {o.name}: shape={o.shape}, dtype={o.format_type}")
+        print(f"  {o.name}: shape={o.shape}")
 
     # Create vstream params — CORRECTED API
     network_group_params = network_group.create_params()
