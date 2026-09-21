@@ -22,10 +22,17 @@ print("\n=== HN keys ===")
 print(list(hn.keys()))
 
 layers = hn.get('layers', hn)
-print(f"\n=== LAYERS type: {type(layers).__name__} ===")
+lines = []
+lines.append(f"=== LAYERS type: {type(layers).__name__} ===")
 if isinstance(layers, dict):
     for name, layer in layers.items():
-        print(f"  {name}  type={type(layer).__name__}  attrs={[a for a in dir(layer) if not a.startswith('_')][:8]}")
+        lines.append(f"  {name}  type={type(layer).__name__}  attrs={[a for a in dir(layer) if not a.startswith('_')][:8]}")
 elif hasattr(layers, '__iter__'):
     for layer in layers:
-        print(f"  {getattr(layer, 'name', '?')}  type={type(layer).__name__}")
+        lines.append(f"  {getattr(layer, 'name', '?')}  type={type(layer).__name__}")
+
+output = "\n".join(lines)
+print(output)
+with open('/content/drive/MyDrive/layer_names.txt', 'w') as f:
+    f.write(output)
+print("\nSaved to Drive as layer_names.txt!")
