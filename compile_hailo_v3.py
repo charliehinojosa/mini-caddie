@@ -1,26 +1,9 @@
 #!/usr/bin/env python3
 """
-CONFIRMED WORKING compile script v3 — WITH NMS POSTPROCESS
+Compile script v3 — WITH NMS POSTPROCESS baked into HEF.
 Run with: /content/dfc_env/bin/python /content/compile_hailo_v3.py
 
-Changes from v2:
-  - Loads a Hailo model script (.alls) that adds NMS postprocess
-  - This bakes NMS into the HEF so hailo-detect --hef-path works directly
-  - No more Pi-side post-processing needed!
-
-The model script tells Hailo to:
-  1. Add sigmoid activation to output layers
-  2. Add NMS postprocess with our 8 classes (not 80 like COCO)
-  3. Handle the DFL decode on-chip
-
-Prerequisites (all in the Python 3.12 venv at /content/dfc_env):
-- DFC 3.34.0 installed with all deps (TF 2.18.0, onnx 1.16.0, etc.)
-- ultralytics installed for ONNX re-export
-- numpy<2 (after ultralytics install to avoid breaking TF 2.18.0)
-
-Before running:
-1. ONNX model re-exported from .pt with simplify=True
-2. Dataset extracted to /content/dataset/unified/valid/images
+After compile, hailo-detect --hef-path works directly — no Pi-side post-processing.
 """
 import os
 os.environ['USER'] = 'colab'
@@ -30,48 +13,27 @@ from PIL import Image
 from hailo_sdk_client import ClientRunner
 import glob, shutil, json
 
-# --- Config ---
-NUM_CLASSES = 8  # golf classes (NOT including background — Hailo adds it)
+NUM_CLASSES = 8
 SCORES_TH = 0.2
 IOU_TH = 0.7
 MAX_PROPOSALS = 100
-REGRESSION_LENGTH = 16  # DFL bins
+REGRESSION_LENGTH = 16
 
-# --- 1. Copy fresh ONNX (re-exported with simplify=True) ---
-shutil.copy('/content/drive/MyDrive/mini_caddie_golf_best.onnx',
-            '/content/mini_caddie_golf_best.onnx')
+# --- 1. Copy ONNX ---
+shutil.copy('/content/drive/MyDrive/mini_caddie_golf_best.onnx', '/content/mini_caddie_golf_best.onnx')
 print(f"ONNX copied: {os.path.getsize('/content/mini_caddie_golf_best.onnx')} bytes")
 
 # --- 2. Create runner and translate ONNX ---
 runner = ClientRunner(hw_arch='hailo8l')
 
-# IMPORTANT: For NMS, we need the FULL model (not cut at Concat_1)
-# The simplified ONNX should parse OK with the right end nodes
-# Try the full model first — if it fails, fall back to Concat_1
-try:
-    runner.translate_onnx_model(
-        '/content/mini_caddie_golf_best.onnx',
-        'mini_caddie_golf',
-        start_node_names=['images'],
-        end_node_names=['/model.22/Concat_1'],  # Try this first (known to work)
-        net_input_shapes={'images': [1, 3, 640, 640]}
-    )
-    print("✅ ONNX translated (cut at Concat_1)!")
-    
-    # Check what outputs we have
-    hn = runner._get_hn()
-    print(f"  Network outputs: {hn.outputs}")
-    
-except Exception as e:
-    print(f"❌ Concat_1 cut failed: {e}")
-    print("  Trying full model parse...")
-    runner.translate_onnx_model(
-        '/content/mini_caddie_golf_best.onnx',
-        'mini_caddie_golf',
-        start_node_names=['images'],
-        net_input_shapes={'images': [1, 3, 640, 640]}
-    )
-    print("✅ ONNX translated (full model)!")
+runner.translate_onnx_model(
+    '/content/mini_caddie_golf_best.onnx',
+    'mini_caddie_golf',
+    start_node_names=['images'],
+    end_node_names=['/model.22/Concat_1'],
+    net_input_shapes={'images': [1, 3, 640, 640]}
+)
+print("ONNX translated!")
 
 # --- 3. Create NMS config JSON ---
 nms_config = {
@@ -107,26 +69,22 @@ nms_config = {
 nms_config_path = '/content/mini_caddie_nms_config.json'
 with open(nms_config_path, 'w') as f:
     json.dump(nms_config, f, indent=4)
-print(f"✅ NMS config written to {nms_config_path}")
+print("NMS config written!")
 
 # --- 4. Create and load Hailo model script (.alls) ---
-# The layer names may differ from standard YOLOv8n — we need to find them
-# First, let's inspect the parsed network to find the output layer names
-alls_script = f"""
-normalization1 = normalization([0.0, 0.0, 0.0], [255.0, 255.0, 255.0])
-nms_postprocess("{nms_config_path}", meta_arch=yolov8, engine=cpu)
-allocator_param(width_splitter_defuse=disabled, spatial_defuse_legacy=True)
-"""
+alls_script = (
+    'normalization1 = normalization([0.0, 0.0, 0.0], [255.0, 255.0, 255.0])\n'
+    'nms_postprocess("' + nms_config_path + '", meta_arch=yolov8, engine=cpu)\n'
+    'allocator_param(width_splitter_defuse=disabled, spatial_defuse_legacy=True)\n'
+)
 
-# Save the .alls script
 alls_path = '/content/mini_caddie_golf.alls'
 with open(alls_path, 'w') as f:
-    f.write(alls_script.strip())
-print(f"✅ Model script written to {alls_path}")
+    f.write(alls_script)
+print("Model script written!")
 
-# Load the model script BEFORE optimization
 runner.load_model_script(alls_path)
-print("✅ Model script loaded!")
+print("Model script loaded!")
 
 # --- 5. Load calibration images ---
 calib_dir = '/content/dataset/unified/valid/images'
@@ -140,24 +98,21 @@ def preprocess(file):
 calib_data = np.array([preprocess(f) for f in calib_files])
 print(f"Calibration shape: {calib_data.shape}")
 
-# --- 6. Optimize (quantize) ---
+# --- 6. Optimize (quantize) — ~17 min ---
 runner.optimize(calib_data)
-print("✅ Optimization/Quantization complete!")
+print("Optimization complete!")
 
 # --- 7. Compile to HEF ---
 hef = runner.compile()
-print("✅ Compile complete!")
+print("Compile complete!")
 
 # --- 8. Save HEF ---
-hef_output = '/content/mini_caddie_golf.hef'
+hef_output = '/content/mini_caddie_golf_nms.hef'
 with open(hef_output, 'wb') as f:
     f.write(hef)
-print(f"✅ HEF saved! Size: {os.path.getsize(hef_output)} bytes")
+print(f"HEF saved! Size: {os.path.getsize(hef_output)} bytes")
 
 # --- 9. Copy to Drive ---
 shutil.copy(hef_output, '/content/drive/MyDrive/mini_caddie_golf_nms.hef')
-print("✅ HEF copied to Drive as mini_caddie_golf_nms.hef!")
-
-# --- 10. Also copy the NMS config for reference ---
 shutil.copy(nms_config_path, '/content/drive/MyDrive/mini_caddie_nms_config.json')
-print("✅ NMS config copied to Drive!")
+print("Copied to Drive!")
