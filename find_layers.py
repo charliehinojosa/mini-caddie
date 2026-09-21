@@ -12,6 +12,14 @@ runner.translate_onnx_model(
     '/content/mini_caddie_golf_best.onnx',
     'mini_caddie_golf',
     start_node_names=['images'],
+    end_node_names=[
+        '/model.22/cv2.0/cv2.0.2/Conv',
+        '/model.22/cv3.0/cv3.0.2/Conv',
+        '/model.22/cv2.1/cv2.1.2/Conv',
+        '/model.22/cv3.1/cv3.1.2/Conv',
+        '/model.22/cv2.2/cv2.2.2/Conv',
+        '/model.22/cv3.2/cv3.2.2/Conv',
+    ],
     net_input_shapes={'images': [1, 3, 640, 640]}
 )
 print("ONNX translated!")
