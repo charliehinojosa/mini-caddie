@@ -30,7 +30,7 @@ runner.translate_onnx_model(
     '/content/mini_caddie_golf_best.onnx',
     'mini_caddie_golf',
     start_node_names=['images'],
-    end_node_names=['/model.22/Concat_1'],
+    end_node_names=['/model.22/dfl/Reshape', '/model.22/Sigmoid'],
     net_input_shapes={'images': [1, 3, 640, 640]}
 )
 print("ONNX translated!")
