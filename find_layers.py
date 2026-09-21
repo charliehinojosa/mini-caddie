@@ -17,7 +17,7 @@ runner.translate_onnx_model(
 )
 print("ONNX translated!")
 
-hn = runner._get_hn()
+hn = runner.get_hn()
 print("\n=== ALL LAYERS ===")
 for layer in hn.layers:
     print(f"  {layer.name}  shape={getattr(layer, 'shape', '?')}  type={getattr(layer, 'type', '?')}")
