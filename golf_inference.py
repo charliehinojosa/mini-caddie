@@ -21,7 +21,7 @@ from hailo_platform import (
     InferVStreams,
     ConfigureParams,
     FormatType,
-    HailoStreamInterface,  # NOT HailoStream
+    HailoStreamInterface,
     InputVStreamParams,
     OutputVStreamParams,
 )
@@ -37,18 +37,15 @@ def main():
     print(f"  Model: {HEF_PATH}")
     print("=" * 60)
 
-    # Load HEF
     hef = HEF(HEF_PATH)
     target = VDevice()
 
-    # Configure — configure() returns a LIST
     configure_params = ConfigureParams.create_from_hef(
         hef, interface=HailoStreamInterface.PCIe
     )
     network_groups = target.configure(hef, configure_params)
     network_group = network_groups[0]
 
-    # Get I/O info
     input_vstreams_info = hef.get_input_vstream_infos()
     output_vstreams_info = hef.get_output_vstream_infos()
 
@@ -60,181 +57,145 @@ def main():
     for o in output_vstreams_info:
         print(f"  {o.name}: shape={o.shape}")
 
-    # Create vstream params — CORRECTED API
-    network_group_params = network_group.create_params()
-    input_vstreams_params = InputVStreamParams.make(network_group_params)
-    output_vstreams_params = OutputVStreamParams.make(network_group_params)
-
-    # Set output format to FLOAT32 — output_vstreams_params is a LIST, not dict
-    for params in output_vstreams_params:
-        params.format_type = FormatType.FLOAT32
-
-    # Create a test image (640x640, HWC, RGB, normalized)
-    # Use a simple gradient so we get non-trivial output
+    # Test image: 640x640 gradient, HWC, RGB, normalized
     test_img = np.zeros((INPUT_SIZE, INPUT_SIZE, 3), dtype=np.float32)
-    # Add a gradient pattern
     for y in range(INPUT_SIZE):
         for x in range(INPUT_SIZE):
-            test_img[y, x, 0] = x / INPUT_SIZE  # R gradient
-            test_img[y, x, 1] = y / INPUT_SIZE  # G gradient
-            test_img[y, x, 2] = 0.5              # B constant
+            test_img[y, x, 0] = x / INPUT_SIZE
+            test_img[y, x, 1] = y / INPUT_SIZE
+            test_img[y, x, 2] = 0.5
     test_img = np.expand_dims(test_img, axis=0)  # (1, 640, 640, 3)
 
     print(f"\n🖼️  Test input shape: {test_img.shape}")
-    print(f"  Input range: [{test_img.min():.3f}, {test_img.max():.3f}]")
 
-    # Run inference on ONE frame
-    print("\n🧠 Running inference on test image...")
-
+    # Create vstream params INSIDE the network_group context
+    # InputVStreamParams.make() expects the activated network group
     with network_group:
+        input_vstreams_params = InputVStreamParams.make(network_group)
+        output_vstreams_params = OutputVStreamParams.make(network_group)
+
+        # Set output to FLOAT32 — try both attr names
+        for params in output_vstreams_params:
+            try:
+                params.format_type = FormatType.FLOAT32
+            except AttributeError:
+                params.user_buffer_format = FormatType.FLOAT32
+
         with InferVStreams(
             target, network_group, input_vstreams_params, output_vstreams_params
         ) as infer_pipeline:
+
+            # ── Run 1: Test gradient image ──
+            print("\n🧠 Running inference on test gradient...")
             input_dict = {input_vstreams_info[0].name: test_img}
             results = infer_pipeline.infer(input_dict)
 
-            # Get the output
             output_name = output_vstreams_info[0].name
             raw_output = results[output_name]
 
             print(f"\n{'=' * 60}")
-            print(f"📊 RAW OUTPUT ANALYSIS")
+            print(f"📊 RAW OUTPUT ANALYSIS (test image)")
             print(f"{'=' * 60}")
             print(f"  Output name: {output_name}")
             print(f"  Output shape: {raw_output.shape}")
             print(f"  Output dtype: {raw_output.dtype}")
-            print(f"  Output size: {raw_output.size} elements")
 
-            # Squeeze batch dim if present
             if raw_output.ndim == 3:
-                flat = raw_output[0]  # (8400, 8)
+                flat = raw_output[0]
             else:
                 flat = raw_output
 
             N, D = flat.shape
             print(f"  Flat shape: ({N}, {D})")
-            print(f"  N (anchors): {N}")
-            print(f"  D (values per anchor): {D}")
 
             print(f"\n📈 Per-column statistics:")
             print(f"  {'col':>4}  {'min':>10}  {'max':>10}  {'mean':>10}  {'std':>10}")
             for col in range(D):
-                col_data = flat[:, col]
-                print(
-                    f"  {col:4d}  {col_data.min():10.4f}  {col_data.max():10.4f}  "
-                    f"{col_data.mean():10.4f}  {col_data.std():10.4f}"
-                )
+                c = flat[:, col]
+                print(f"  {col:4d}  {c.min():10.4f}  {c.max():10.4f}  {c.mean():10.4f}  {c.std():10.4f}")
 
             print(f"\n🔢 Sample anchors (first 10):")
             for i in range(min(10, N)):
-                print(f"  anchor[{i:4d}]: {flat[i]}")
+                print(f"  [{i:4d}]: {flat[i]}")
 
             print(f"\n🔢 Sample anchors (middle 10):")
             mid = N // 2
             for i in range(mid, mid + 10):
-                print(f"  anchor[{i:4d}]: {flat[i]}")
+                print(f"  [{i:4d}]: {flat[i]}")
 
             print(f"\n🔢 Sample anchors (last 10):")
             for i in range(max(0, N - 10), N):
-                print(f"  anchor[{i:4d}]: {flat[i]}")
+                print(f"  [{i:4d}]: {flat[i]}")
 
-            # Check if values look like they need sigmoid (0-1 range after sigmoid)
             print(f"\n🔬 Analysis:")
-            print(f"  All values in [0, 1]?  {bool((flat >= 0).all() and (flat <= 1).all())}")
-            print(f"  All values in [-1, 1]? {bool((flat >= -1).all() and (flat <= 1).all())}")
-            print(f"  Any negative values?   {bool((flat < 0).any())}")
-            print(f"  Any values > 1?        {bool((flat > 1).any())}")
-            print(f"  Any values > 10?       {bool((flat > 10).any())}")
-            print(f"  Any values > 100?      {bool((flat > 100).any())}")
-            print(f"  Any values > 640?      {bool((flat > 640).any())}")
+            in01 = bool((flat >= 0).all() and (flat <= 1).all())
+            has_neg = bool((flat < 0).any())
+            print(f"  All in [0,1]?     {in01}")
+            print(f"  Any negative?     {has_neg}")
+            print(f"  Any > 1?          {bool((flat > 1).any())}")
+            print(f"  Any > 10?         {bool((flat > 10).any())}")
+            print(f"  Any > 640?        {bool((flat > 640).any())}")
 
-            # Check if first 4 cols look like coordinates (larger range)
             if D >= 4:
-                bbox_range = flat[:, :4].max() - flat[:, :4].min()
-                cls_range = flat[:, 4:].max() - flat[:, 4:].min()
-                print(f"\n  First 4 cols range: {bbox_range:.4f}")
-                print(f"  Last {D - 4} cols range: {cls_range:.4f}")
-                if bbox_range > cls_range * 2:
-                    print(f"  → First 4 cols look like COORDINATES (larger range)")
-                else:
-                    print(f"  → Ranges are similar — could all be scores or all coords")
+                r1 = flat[:, :4].max() - flat[:, :4].min()
+                r2 = flat[:, 4:].max() - flat[:, 4:].min()
+                print(f"  First 4 cols range: {r1:.4f}")
+                print(f"  Last {D-4} cols range: {r2:.4f}")
 
-            # If all values are in 0-1, they might already be sigmoid'd
-            if (flat >= 0).all() and (flat <= 1).all():
-                print(f"\n  → Values in [0,1] — likely already sigmoid'd class scores")
-                print(f"  → 8 values = 8 class scores (NO bbox in output)")
-                print(f"  → Bbox may need to be decoded from a different output layer")
-            elif (flat[:, :4] > 1).any():
-                print(f"\n  → First 4 cols have values > 1 — likely raw coordinates")
-                print(f"  → Format: [cx, cy, w, h, cls0, cls1, cls2, cls3]")
-
-            # Also try with a real camera frame if available
+            # ── Run 2: Camera frame ──
             print(f"\n{'=' * 60}")
-            print(f"📷 Attempting camera frame...")
+            print(f"📷 Camera frame...")
             print(f"{'=' * 60}")
 
             cap = cv2.VideoCapture(0)
             if cap.isOpened():
                 ret, frame = cap.read()
                 if ret:
-                    print(f"  Camera frame shape: {frame.shape}")
+                    print(f"  Camera shape: {frame.shape}")
                     img_h, img_w = frame.shape[:2]
 
-                    # Preprocess: HWC format
                     input_img = cv2.resize(frame, (INPUT_SIZE, INPUT_SIZE))
                     input_img = cv2.cvtColor(input_img, cv2.COLOR_BGR2RGB)
                     input_img = input_img.astype(np.float32) / 255.0
                     input_img = np.expand_dims(input_img, axis=0)
 
-                    input_dict = {input_vstreams_info[0].name: input_img}
-                    cam_results = infer_pipeline.infer(input_dict)
+                    cam_results = infer_pipeline.infer(
+                        {input_vstreams_info[0].name: input_img}
+                    )
+                    cam_out = cam_results[output_name]
+                    cam_flat = cam_out[0] if cam_out.ndim == 3 else cam_out
 
-                    cam_output = cam_results[output_name]
-                    if cam_output.ndim == 3:
-                        cam_flat = cam_output[0]
-                    else:
-                        cam_flat = cam_output
+                    print(f"  Camera output shape: {cam_out.shape}")
+                    print(f"  Flat shape: {cam_flat.shape}")
 
-                    print(f"\n  Camera output shape: {cam_output.shape}")
-                    print(f"  Camera flat shape: {cam_flat.shape}")
-
-                    print(f"\n  Per-column stats (camera frame):")
+                    print(f"\n  Per-column stats (camera):")
                     print(f"  {'col':>4}  {'min':>10}  {'max':>10}  {'mean':>10}  {'std':>10}")
                     for col in range(cam_flat.shape[-1]):
-                        col_data = cam_flat[:, col]
-                        print(
-                            f"  {col:4d}  {col_data.min():10.4f}  {col_data.max():10.4f}  "
-                            f"{col_data.mean():10.4f}  {col_data.std():10.4f}"
-                        )
+                        c = cam_flat[:, col]
+                        print(f"  {col:4d}  {c.min():10.4f}  {c.max():10.4f}  {c.mean():10.4f}  {c.std():10.4f}")
 
-                    # Show top-10 highest-scoring anchors
-                    max_scores = cam_flat.max(axis=-1)
-                    top10 = max_scores.argsort()[-10:][::-1]
+                    # Top 10 highest-scoring anchors
+                    max_vals = cam_flat.max(axis=-1)
+                    top10 = max_vals.argsort()[-10:][::-1]
                     print(f"\n  Top 10 anchors by max value:")
                     for idx in top10:
-                        print(
-                            f"  anchor[{idx:4d}]: max={max_scores[idx]:.4f}  "
-                            f"values={cam_flat[idx]}"
-                        )
+                        print(f"  [{idx:4d}]: max={max_vals[idx]:.4f}  vals={cam_flat[idx]}")
 
-                    # If 8 values, check top anchors per column
-                    if cam_flat.shape[-1] == 8:
-                        print(f"\n  Top 5 anchors per column (camera frame):")
-                        for col in range(8):
-                            top5 = cam_flat[:, col].argsort()[-5:][::-1]
-                            print(f"  col {col}: ", end="")
-                            for idx in top5:
-                                print(f"[{idx}:{cam_flat[idx, col]:.3f}] ", end="")
-                            print()
+                    # Top 5 per column
+                    D2 = cam_flat.shape[-1]
+                    print(f"\n  Top 5 anchors per column:")
+                    for col in range(D2):
+                        top5 = cam_flat[:, col].argsort()[-5:][::-1]
+                        vals = " ".join(f"[{i}:{cam_flat[i,col]:.3f}]" for i in top5)
+                        print(f"  col {col}: {vals}")
                 else:
                     print("  ❌ Camera read failed")
                 cap.release()
             else:
-                print("  ⚠️  No camera available (that's OK — test image output above is enough)")
+                print("  ⚠️  No camera — test image output above is enough")
 
     print(f"\n{'=' * 60}")
     print("✅ Debug complete! Copy this output and send it to Caddie.")
-    print("   We'll use it to determine the exact output format.")
     print("=" * 60)
 
 
@@ -246,5 +207,4 @@ if __name__ == "__main__":
     except Exception as e:
         print(f"\n❌ Error: {e}")
         import traceback
-
         traceback.print_exc()
