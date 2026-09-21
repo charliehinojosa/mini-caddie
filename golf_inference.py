@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """
-Mini Caddie — Golf Inference (Pi-side NMS)
-Uses hailort Python bindings directly — no GStreamer pipeline.
-Runs our custom YOLOv8n HEF and does DFL decode + NMS on the Pi.
+Mini Caddie — Golf Inference (DEBUG MODE)
+Uses hailo_platform Python bindings directly — no GStreamer pipeline.
+
+This version runs ONE frame, dumps the raw output tensor values, and exits.
+No camera display loop — just debug output to figure out the (8400, 8) format.
 
 Usage:
   cd ~/hailo-apps && source setup_env.sh
@@ -10,349 +12,239 @@ Usage:
 """
 import os
 import sys
-import json
-import time
 import numpy as np
 import cv2
 
-# Hailo imports
 from hailo_platform import (
     HEF,
     VDevice,
     InferVStreams,
     ConfigureParams,
     FormatType,
-    HailoStreamInterface,
+    HailoStreamInterface,  # NOT HailoStream
     InputVStreamParams,
     OutputVStreamParams,
 )
 
-LABELS = [
-    "background", "golf_ball", "golf_club", "golf_club_head",
-    "golf_hole", "golf_mat", "person", "player_not_ready", "player_ready"
-]
-
-CONF_THRESHOLD = 0.25
-IOU_THRESHOLD = 0.45
-NUM_CLASSES = 8
+# ── Config ──────────────────────────────────────────────────────────────────
 INPUT_SIZE = 640
+HEF_PATH = os.path.expanduser("~/mini-caddie/mini_caddie_golf.hef")
 
-# Anchor config for YOLOv8 (strides 8, 16, 32)
-ANCHOR_STRIDES = [8, 16, 32]
-ANCHOR_GRIDS = [80, 40, 20]  # 640/stride
-TOTAL_ANCHORS = sum(g * g for g in ANCHOR_GRIDS)  # 8400
-
-
-def build_anchors():
-    """Build anchor centers and strides for all 8400 YOLOv8 anchors."""
-    centers = []
-    strides = []
-    for stride, grid in zip(ANCHOR_STRIDES, ANCHOR_GRIDS):
-        for y in range(grid):
-            for x in range(grid):
-                centers.append([x * stride + stride // 2, y * stride + stride // 2])
-                strides.append(stride)
-    return np.array(centers, dtype=np.float32), np.array(strides, dtype=np.float32)
-
-
-ANCHOR_CENTERS, ANCHOR_STRIDES_ARR = build_anchors()
-
-
-def dfl_decode(box_pred):
-    """Decode DFL: (N, 64) -> (N, 4) [l, t, r, b] in grid units."""
-    N = box_pred.shape[0]
-    box_pred = box_pred.reshape(N, 4, 16)
-    exp = np.exp(box_pred - box_pred.max(axis=-1, keepdims=True))
-    prob = exp / exp.sum(axis=-1, keepdims=True)
-    bins = np.arange(16, dtype=np.float32)
-    return (prob * bins).sum(axis=-1)
-
-
-def nms(boxes, scores, iou_threshold):
-    """Simple NMS returning kept indices."""
-    order = scores.argsort()[::-1]
-    keep = []
-    while order.size > 0:
-        i = order[0]
-        keep.append(i)
-        if order.size == 1:
-            break
-        xx1 = np.maximum(boxes[i, 0], boxes[order[1:], 0])
-        yy1 = np.maximum(boxes[i, 1], boxes[order[1:], 1])
-        xx2 = np.minimum(boxes[i, 2], boxes[order[1:], 2])
-        yy2 = np.minimum(boxes[i, 3], boxes[order[1:], 3])
-        w = np.maximum(0, xx2 - xx1)
-        h = np.maximum(0, yy2 - yy1)
-        inter = w * h
-        area_i = (boxes[i, 2] - boxes[i, 0]) * (boxes[i, 3] - boxes[i, 1])
-        area_j = (boxes[order[1:], 2] - boxes[order[1:], 0]) * (boxes[order[1:], 3] - boxes[order[1:], 1])
-        iou = inter / np.maximum(area_i + area_j - inter, 1e-9)
-        idx = np.where(iou <= iou_threshold)[0]
-        order = order[idx + 1]
-    return keep
-
-
-def postprocess(raw_output, img_w, img_h):
-    """Full post-processing: NMS on decoded output.
-    
-    Output shape from HEF: (1, 8400, 8) — DFL already decoded by Hailo.
-    8 values per anchor: 4 bbox (cx, cy, w, h in pixels relative to 640) + 4 class scores? 
-    Or: 4 bbox (l, t, r, b) + 4 class scores.
-    We'll figure out the exact format from the data.
-    """
-    if raw_output.ndim == 3:
-        raw_output = raw_output[0]  # (8400, 8)
-
-    N = raw_output.shape[0]
-    print(f"  [DEBUG] Output shape: {raw_output.shape}, sample[0]: {raw_output[0]}")
-    
-    # With 8 values and 8 classes, this is likely just class scores (no bbox)
-    # Or 4 bbox + 4 classes = 8 total
-    # Let's check: if first 4 values are in a different range than last 4
-    # For now, assume 4 bbox + 4 classes (but we have 8 classes, not 4!)
-    
-    # Actually with 8 classes and output dim=8, this might be:
-    # Option A: just 8 class scores, no bbox (NMS-only output)
-    # Option B: 4 bbox + 4 class scores (only 4 classes made it through?)
-    
-    # Most likely: the compilation merged DFL and the output is 
-    # [cx, cy, w, h, cls0, cls1, cls2, cls3] — but that's only 4 classes
-    # OR: the 8 values ARE the 8 class scores and bbox is separate
-    
-    # Let's just try: 4 bbox + 4 classes
-    if raw_output.shape[-1] == 8:
-        # Could be 4 bbox + 4 classes, or 8 classes only
-        # Print sample for debugging
-        sample = raw_output[0]
-        print(f"  [DEBUG] Sample anchor 0: {sample}")
-        print(f"  [DEBUG] Sample anchor 100: {raw_output[100]}")
-        print(f"  [DEBUG] Sample anchor 4000: {raw_output[4000]}")
-        print(f"  [DEBUG] Min/Max per col: {raw_output.min(axis=0)} / {raw_output.max(axis=0)}")
-        
-        # If first 4 cols look like coords (larger range) and last 4 like scores (0-1)
-        # then it's 4 bbox + 4 classes
-        # If all 8 look like scores (0-1 range), it's 8 classes only
-        
-        col_ranges = raw_output.max(axis=0) - raw_output.min(axis=0)
-        print(f"  [DEBUG] Range per col: {col_ranges}")
-        
-        # Try treating as 4 bbox + 4 classes first
-        boxes_raw = raw_output[:, :4]
-        cls_pred = raw_output[:, 4:]
-        
-        # If cls_pred has more than 4 classes, we need different split
-        # For now just return empty and debug
-        print(f"  [DEBUG] Assuming 4 bbox + 4 classes (may be wrong)")
-        
-        # Bbox might be [cx, cy, w, h] in pixel coords (relative to 640)
-        # Scale to image size
-        cx = boxes_raw[:, 0] / INPUT_SIZE * img_w
-        cy = boxes_raw[:, 1] / INPUT_SIZE * img_h
-        w = boxes_raw[:, 2] / INPUT_SIZE * img_w
-        h = boxes_raw[:, 3] / INPUT_SIZE * img_h
-        
-        x1 = cx - w / 2
-        y1 = cy - h / 2
-        x2 = cx + w / 2
-        y2 = cy + h / 2
-        
-        boxes = np.stack([x1, y1, x2, y2], axis=-1)
-        
-        # Sigmoid class scores
-        cls_scores = 1.0 / (1.0 + np.exp(-cls_pred))
-        class_ids = cls_scores.argmax(axis=-1)
-        max_scores = cls_scores.max(axis=-1)
-        
-        mask = max_scores > CONF_THRESHOLD
-        boxes = boxes[mask]
-        class_ids = class_ids[mask]
-        max_scores = max_scores[mask]
-        
-        if len(boxes) == 0:
-            return []
-        
-        results = []
-        for cls_id in range(cls_pred.shape[-1]):
-            cls_mask = class_ids == cls_id
-            if not cls_mask.any():
-                continue
-            cb = boxes[cls_mask]
-            cs = max_scores[cls_mask]
-            keep = nms(cb, cs, IOU_THRESHOLD)
-            for idx in keep:
-                label_idx = cls_id + 1  # +1 for background
-                if label_idx < len(LABELS):
-                    label = LABELS[label_idx]
-                else:
-                    label = f"class_{cls_id}"
-                results.append({
-                    "label": label,
-                    "confidence": float(cs[idx]),
-                    "bbox": [float(v) for v in cb[idx]],
-                })
-        
-        return results
-    
-    # Fallback: try the original 72-dim approach
-    expected_dim = 4 * 16 + NUM_CLASSES  # 72
-    if raw_output.shape[-1] == expected_dim:
-        return _postprocess_dfl(raw_output, img_w, img_h)
-    
-    print(f"  [WARN] Unexpected output shape: {raw_output.shape}")
-    return []
-
-
-def _postprocess_dfl(raw_output, img_w, img_h):
-    """Original DFL-based postprocess for 72-dim output."""
-    N = raw_output.shape[0]
-    box_dim = 4 * 16
-
-    box_pred = raw_output[:, :box_dim]
-    cls_pred = raw_output[:, box_dim:]
-
-    decoded = dfl_decode(box_pred)
-
-    if N != TOTAL_ANCHORS:
-        print(f"  [WARN] Got {N} anchors, expected {TOTAL_ANCHORS}")
-
-    anchors = ANCHOR_CENTERS[:N]
-    strides = ANCHOR_STRIDES_ARR[:N]
-
-    l = decoded[:, 0] * strides
-    t = decoded[:, 1] * strides
-    r = decoded[:, 2] * strides
-    b = decoded[:, 3] * strides
-
-    cx = anchors[:, 0]
-    cy = anchors[:, 1]
-
-    x1 = (cx - l) / INPUT_SIZE * img_w
-    y1 = (cy - t) / INPUT_SIZE * img_h
-    x2 = (cx + r) / INPUT_SIZE * img_w
-    y2 = (cy + b) / INPUT_SIZE * img_h
-
-    boxes = np.stack([x1, y1, x2, y2], axis=-1)
-
-    cls_scores = 1.0 / (1.0 + np.exp(-cls_pred))
-    class_ids = cls_scores.argmax(axis=-1)
-    max_scores = cls_scores.max(axis=-1)
-
-    mask = max_scores > CONF_THRESHOLD
-    boxes = boxes[mask]
-    class_ids = class_ids[mask]
-    max_scores = max_scores[mask]
-
-    if len(boxes) == 0:
-        return []
-
-    results = []
-    for cls_id in range(NUM_CLASSES):
-        cls_mask = class_ids == cls_id
-        if not cls_mask.any():
-            continue
-        cb = boxes[cls_mask]
-        cs = max_scores[cls_mask]
-        keep = nms(cb, cs, IOU_THRESHOLD)
-        for idx in keep:
-            results.append({
-                "label": LABELS[cls_id + 1],
-                "confidence": float(cs[idx]),
-                "bbox": [float(v) for v in cb[idx]],
-            })
-
-    return results
-
-
+# ── Main ────────────────────────────────────────────────────────────────────
 def main():
-    hef_path = os.path.expanduser("~/mini-caddie/mini_caddie_golf.hef")
-    print("⛳ Mini Caddie — Golf Inference")
-    print(f"  Model: {hef_path}")
-    print("  Press Ctrl+C to stop\n")
+    print("=" * 60)
+    print("⛳ Mini Caddie — DEBUG MODE")
+    print(f"  Model: {HEF_PATH}")
+    print("=" * 60)
 
-    hef = HEF(hef_path)
+    # Load HEF
+    hef = HEF(HEF_PATH)
     target = VDevice()
 
-    configure_params = ConfigureParams.create_from_hef(hef, interface=HailoStreamInterface.PCIe)
+    # Configure — configure() returns a LIST
+    configure_params = ConfigureParams.create_from_hef(
+        hef, interface=HailoStreamInterface.PCIe
+    )
     network_groups = target.configure(hef, configure_params)
     network_group = network_groups[0]
 
+    # Get I/O info
     input_vstreams_info = hef.get_input_vstream_infos()
     output_vstreams_info = hef.get_output_vstream_infos()
 
-    print(f"  Inputs: {[(i.name, i.shape) for i in input_vstreams_info]}")
-    print(f"  Outputs: {[(o.name, o.shape) for o in output_vstreams_info]}")
+    print(f"\n📥 Inputs:")
+    for i in input_vstreams_info:
+        print(f"  {i.name}: shape={i.shape}, dtype={i.format_type}")
 
-    input_vstreams_params = InputVStreamParams.make(network_group)
-    output_vstreams_params = OutputVStreamParams.make(network_group)
+    print(f"\n📤 Outputs:")
+    for o in output_vstreams_info:
+        print(f"  {o.name}: shape={o.shape}, dtype={o.format_type}")
 
-    for params in output_vstreams_params.values():
+    # Create vstream params — CORRECTED API
+    network_group_params = network_group.create_params()
+    input_vstreams_params = InputVStreamParams.make(network_group_params)
+    output_vstreams_params = OutputVStreamParams.make(network_group_params)
+
+    # Set output format to FLOAT32 — output_vstreams_params is a LIST, not dict
+    for params in output_vstreams_params:
         params.format_type = FormatType.FLOAT32
 
-    cap = cv2.VideoCapture(0)
-    if not cap.isOpened():
-        print("❌ Cannot open camera!")
-        sys.exit(1)
+    # Create a test image (640x640, HWC, RGB, normalized)
+    # Use a simple gradient so we get non-trivial output
+    test_img = np.zeros((INPUT_SIZE, INPUT_SIZE, 3), dtype=np.float32)
+    # Add a gradient pattern
+    for y in range(INPUT_SIZE):
+        for x in range(INPUT_SIZE):
+            test_img[y, x, 0] = x / INPUT_SIZE  # R gradient
+            test_img[y, x, 1] = y / INPUT_SIZE  # G gradient
+            test_img[y, x, 2] = 0.5              # B constant
+    test_img = np.expand_dims(test_img, axis=0)  # (1, 640, 640, 3)
 
-    cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
-    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+    print(f"\n🖼️  Test input shape: {test_img.shape}")
+    print(f"  Input range: [{test_img.min():.3f}, {test_img.max():.3f}]")
 
-    print("\n  Camera opened. Running inference...\n")
-
-    frame_count = 0
-    fps_start = time.time()
+    # Run inference on ONE frame
+    print("\n🧠 Running inference on test image...")
 
     with network_group:
-        with InferVStreams(target, network_group, input_vstreams_params, output_vstreams_params) as infer_pipeline:
-            while True:
+        with InferVStreams(
+            target, network_group, input_vstreams_params, output_vstreams_params
+        ) as infer_pipeline:
+            input_dict = {input_vstreams_info[0].name: test_img}
+            results = infer_pipeline.infer(input_dict)
+
+            # Get the output
+            output_name = output_vstreams_info[0].name
+            raw_output = results[output_name]
+
+            print(f"\n{'=' * 60}")
+            print(f"📊 RAW OUTPUT ANALYSIS")
+            print(f"{'=' * 60}")
+            print(f"  Output name: {output_name}")
+            print(f"  Output shape: {raw_output.shape}")
+            print(f"  Output dtype: {raw_output.dtype}")
+            print(f"  Output size: {raw_output.size} elements")
+
+            # Squeeze batch dim if present
+            if raw_output.ndim == 3:
+                flat = raw_output[0]  # (8400, 8)
+            else:
+                flat = raw_output
+
+            N, D = flat.shape
+            print(f"  Flat shape: ({N}, {D})")
+            print(f"  N (anchors): {N}")
+            print(f"  D (values per anchor): {D}")
+
+            print(f"\n📈 Per-column statistics:")
+            print(f"  {'col':>4}  {'min':>10}  {'max':>10}  {'mean':>10}  {'std':>10}")
+            for col in range(D):
+                col_data = flat[:, col]
+                print(
+                    f"  {col:4d}  {col_data.min():10.4f}  {col_data.max():10.4f}  "
+                    f"{col_data.mean():10.4f}  {col_data.std():10.4f}"
+                )
+
+            print(f"\n🔢 Sample anchors (first 10):")
+            for i in range(min(10, N)):
+                print(f"  anchor[{i:4d}]: {flat[i]}")
+
+            print(f"\n🔢 Sample anchors (middle 10):")
+            mid = N // 2
+            for i in range(mid, mid + 10):
+                print(f"  anchor[{i:4d}]: {flat[i]}")
+
+            print(f"\n🔢 Sample anchors (last 10):")
+            for i in range(max(0, N - 10), N):
+                print(f"  anchor[{i:4d}]: {flat[i]}")
+
+            # Check if values look like they need sigmoid (0-1 range after sigmoid)
+            print(f"\n🔬 Analysis:")
+            print(f"  All values in [0, 1]?  {bool((flat >= 0).all() and (flat <= 1).all())}")
+            print(f"  All values in [-1, 1]? {bool((flat >= -1).all() and (flat <= 1).all())}")
+            print(f"  Any negative values?   {bool((flat < 0).any())}")
+            print(f"  Any values > 1?        {bool((flat > 1).any())}")
+            print(f"  Any values > 10?       {bool((flat > 10).any())}")
+            print(f"  Any values > 100?      {bool((flat > 100).any())}")
+            print(f"  Any values > 640?      {bool((flat > 640).any())}")
+
+            # Check if first 4 cols look like coordinates (larger range)
+            if D >= 4:
+                bbox_range = flat[:, :4].max() - flat[:, :4].min()
+                cls_range = flat[:, 4:].max() - flat[:, 4:].min()
+                print(f"\n  First 4 cols range: {bbox_range:.4f}")
+                print(f"  Last {D - 4} cols range: {cls_range:.4f}")
+                if bbox_range > cls_range * 2:
+                    print(f"  → First 4 cols look like COORDINATES (larger range)")
+                else:
+                    print(f"  → Ranges are similar — could all be scores or all coords")
+
+            # If all values are in 0-1, they might already be sigmoid'd
+            if (flat >= 0).all() and (flat <= 1).all():
+                print(f"\n  → Values in [0,1] — likely already sigmoid'd class scores")
+                print(f"  → 8 values = 8 class scores (NO bbox in output)")
+                print(f"  → Bbox may need to be decoded from a different output layer")
+            elif (flat[:, :4] > 1).any():
+                print(f"\n  → First 4 cols have values > 1 — likely raw coordinates")
+                print(f"  → Format: [cx, cy, w, h, cls0, cls1, cls2, cls3]")
+
+            # Also try with a real camera frame if available
+            print(f"\n{'=' * 60}")
+            print(f"📷 Attempting camera frame...")
+            print(f"{'=' * 60}")
+
+            cap = cv2.VideoCapture(0)
+            if cap.isOpened():
                 ret, frame = cap.read()
-                if not ret:
-                    print("❌ Camera read failed!")
-                    break
+                if ret:
+                    print(f"  Camera frame shape: {frame.shape}")
+                    img_h, img_w = frame.shape[:2]
 
-                frame_count += 1
-                img_h, img_w = frame.shape[:2]
+                    # Preprocess: HWC format
+                    input_img = cv2.resize(frame, (INPUT_SIZE, INPUT_SIZE))
+                    input_img = cv2.cvtColor(input_img, cv2.COLOR_BGR2RGB)
+                    input_img = input_img.astype(np.float32) / 255.0
+                    input_img = np.expand_dims(input_img, axis=0)
 
-                input_img = cv2.resize(frame, (INPUT_SIZE, INPUT_SIZE))
-                input_img = cv2.cvtColor(input_img, cv2.COLOR_BGR2RGB)
-                input_img = input_img.astype(np.float32) / 255.0
-                # Input shape is (640, 640, 3) = HWC, keep as-is
-                input_img = np.expand_dims(input_img, axis=0)  # Add batch dim
+                    input_dict = {input_vstreams_info[0].name: input_img}
+                    cam_results = infer_pipeline.infer(input_dict)
 
-                input_dict = {input_vstreams_info[0].name: input_img}
-                results = infer_pipeline.infer(input_dict)
+                    cam_output = cam_results[output_name]
+                    if cam_output.ndim == 3:
+                        cam_flat = cam_output[0]
+                    else:
+                        cam_flat = cam_output
 
-                output_name = output_vstreams_info[0].name
-                raw_output = results[output_name]
+                    print(f"\n  Camera output shape: {cam_output.shape}")
+                    print(f"  Camera flat shape: {cam_flat.shape}")
 
-                detections = postprocess(raw_output, img_w, img_h)
+                    print(f"\n  Per-column stats (camera frame):")
+                    print(f"  {'col':>4}  {'min':>10}  {'max':>10}  {'mean':>10}  {'std':>10}")
+                    for col in range(cam_flat.shape[-1]):
+                        col_data = cam_flat[:, col]
+                        print(
+                            f"  {col:4d}  {col_data.min():10.4f}  {col_data.max():10.4f}  "
+                            f"{col_data.mean():10.4f}  {col_data.std():10.4f}"
+                        )
 
-                for det in detections:
-                    x1, y1, x2, y2 = [int(v) for v in det["bbox"]]
-                    label = det["label"]
-                    conf = det["confidence"]
+                    # Show top-10 highest-scoring anchors
+                    max_scores = cam_flat.max(axis=-1)
+                    top10 = max_scores.argsort()[-10:][::-1]
+                    print(f"\n  Top 10 anchors by max value:")
+                    for idx in top10:
+                        print(
+                            f"  anchor[{idx:4d}]: max={max_scores[idx]:.4f}  "
+                            f"values={cam_flat[idx]}"
+                        )
 
-                    color = (0, 255, 0)
-                    cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
-                    cv2.putText(frame, f"{label} {conf:.0%}", (x1, y1 - 5),
-                               cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1)
+                    # If 8 values, check top anchors per column
+                    if cam_flat.shape[-1] == 8:
+                        print(f"\n  Top 5 anchors per column (camera frame):")
+                        for col in range(8):
+                            top5 = cam_flat[:, col].argsort()[-5:][::-1]
+                            print(f"  col {col}: ", end="")
+                            for idx in top5:
+                                print(f"[{idx}:{cam_flat[idx, col]:.3f}] ", end="")
+                            print()
+                else:
+                    print("  ❌ Camera read failed")
+                cap.release()
+            else:
+                print("  ⚠️  No camera available (that's OK — test image output above is enough)")
 
-                if frame_count % 30 == 0:
-                    elapsed = time.time() - fps_start
-                    fps = frame_count / elapsed
-                    det_str = ", ".join(f"{d['label']}:{d['confidence']:.0%}" for d in detections)
-                    print(f"  FPS: {fps:.1f} | Frame {frame_count} | Detections: {det_str or 'none'}")
-
-                cv2.imshow("Mini Caddie", frame)
-                if cv2.waitKey(1) & 0xFF == ord('q'):
-                    break
-
-    cap.release()
-    cv2.destroyAllWindows()
-    print("\n Done!")
+    print(f"\n{'=' * 60}")
+    print("✅ Debug complete! Copy this output and send it to Caddie.")
+    print("   We'll use it to determine the exact output format.")
+    print("=" * 60)
 
 
 if __name__ == "__main__":
     try:
         main()
     except KeyboardInterrupt:
-        print("\n Stopped!")
+        print("\n⏹️  Stopped!")
+    except Exception as e:
+        print(f"\n❌ Error: {e}")
+        import traceback
+
+        traceback.print_exc()
