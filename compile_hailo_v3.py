@@ -51,6 +51,26 @@ nms_config = {
     "classes": NUM_CLASSES,
     "regression_length": REGRESSION_LENGTH,
     "background_removal": False,
+    "bbox_decoders": [
+        {
+            "name": "mini_caddie_golf/bbox_decoder41",
+            "stride": 8,
+            "reg_layer": "mini_caddie_golf/conv41",
+            "cls_layer": "mini_caddie_golf/conv42"
+        },
+        {
+            "name": "mini_caddie_golf/bbox_decoder52",
+            "stride": 16,
+            "reg_layer": "mini_caddie_golf/conv52",
+            "cls_layer": "mini_caddie_golf/conv53"
+        },
+        {
+            "name": "mini_caddie_golf/bbox_decoder62",
+            "stride": 32,
+            "reg_layer": "mini_caddie_golf/conv62",
+            "cls_layer": "mini_caddie_golf/conv63"
+        }
+    ]
 }
 
 nms_config_path = '/content/mini_caddie_nms_config.json'
