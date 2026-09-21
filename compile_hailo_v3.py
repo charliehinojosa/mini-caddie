@@ -30,7 +30,14 @@ runner.translate_onnx_model(
     '/content/mini_caddie_golf_best.onnx',
     'mini_caddie_golf',
     start_node_names=['images'],
-    end_node_names=['/model.22/Concat_1'],
+    end_node_names=[
+        '/model.22/cv2.0/cv2.0.2/Conv',
+        '/model.22/cv3.0/cv3.0.2/Conv',
+        '/model.22/cv2.1/cv2.1.2/Conv',
+        '/model.22/cv3.1/cv3.1.2/Conv',
+        '/model.22/cv2.2/cv2.2.2/Conv',
+        '/model.22/cv3.2/cv3.2.2/Conv',
+    ],
     net_input_shapes={'images': [1, 3, 640, 640]}
 )
 print("ONNX translated!")
@@ -44,26 +51,6 @@ nms_config = {
     "classes": NUM_CLASSES,
     "regression_length": REGRESSION_LENGTH,
     "background_removal": False,
-    "bbox_decoders": [
-        {
-            "name": "mini_caddie_golf/bbox_decoder41",
-            "stride": 8,
-            "reg_layer": "mini_caddie_golf/conv41",
-            "cls_layer": "mini_caddie_golf/conv42"
-        },
-        {
-            "name": "mini_caddie_golf/bbox_decoder52",
-            "stride": 16,
-            "reg_layer": "mini_caddie_golf/conv52",
-            "cls_layer": "mini_caddie_golf/conv53"
-        },
-        {
-            "name": "mini_caddie_golf/bbox_decoder62",
-            "stride": 32,
-            "reg_layer": "mini_caddie_golf/conv54",
-            "cls_layer": "mini_caddie_golf/format_conversion3"
-        }
-    ]
 }
 
 nms_config_path = '/content/mini_caddie_nms_config.json'
