@@ -18,14 +18,15 @@ runner.translate_onnx_model(
 print("ONNX translated!")
 
 hn = runner.get_hn()
+print("\n=== HN type ===")
+print(type(hn))
+print("\n=== HN attrs ===")
+print([a for a in dir(hn) if not a.startswith('_')])
+
 print("\n=== ALL LAYERS ===")
-for layer in hn.layers:
-    print(f"  {layer.name}  shape={getattr(layer, 'shape', '?')}  type={getattr(layer, 'type', '?')}")
-
-print("\n=== OUTPUT LAYERS ===")
-for out in hn.outputs:
-    print(f"  {out.name}  shape={getattr(out, 'shape', '?')}")
-
-print("\n=== INPUT LAYERS ===")
-for inp in hn.inputs:
-    print(f"  {inp.name}  shape={getattr(inp, 'shape', '?')}")
+if hasattr(hn, 'layers'):
+    for layer in hn.layers:
+        print(f"  {layer.name}  shape={getattr(layer, 'shape', '?')}")
+elif isinstance(hn, dict):
+    for name, layer in hn.items():
+        print(f"  {name}  type={type(layer).__name__}  attrs={[a for a in dir(layer) if not a.startswith('_')][:10]}")
