@@ -142,7 +142,7 @@ def main():
                 elif frame_count % 10 == 0:
                     elapsed = time.time() - start_time
                     fps = frame_count / elapsed
-                    # Debug: dump raw NMS max values per class
+                    # Debug: dump raw NMS output stats
                     with InferVStreams(ng, input_params, output_params, target) as pipe:
                         frame_resized = cv2.resize(frame, (640, 640))
                         if frame_resized.shape[2] == 4:
@@ -150,11 +150,19 @@ def main():
                         input_array = np.expand_dims(frame_resized, axis=0).astype(np.uint8)
                         r = pipe.infer({input_name: input_array})
                         nms = r[output_name][0]  # (8, 5, 100)
-                        max_scores = []
-                        for c in range(8):
-                            max_s = nms[c, 4, :].max()
-                            max_scores.append(f"{LABELS[c]}:{max_s:.3f}")
-                        print(f"  [Frame {frame_count}] {fps:.1f} FPS | max scores: {', '.join(max_scores)}")
+                        # Print shape and non-zero count
+                        nz = np.count_nonzero(nms)
+                        print(f"  [Frame {frame_count}] {fps:.1f} FPS | shape={nms.shape} nonzero={nz}")
+                        # Check all 5 values for class 0 and class 5 (person)
+                        for c in [0, 5]:
+                            row = nms[c]  # (5, 100)
+                            print(f"    class {c} ({LABELS[c]}): score_max={row[4].max():.4f} "
+                                  f"y_min range=[{row[0].min():.3f},{row[0].max():.3f}] "
+                                  f"x_min range=[{row[1].min():.3f},{row[1].max():.3f}]")
+                        # Also check if score is at index 0 instead of 4
+                        print(f"    [alt check] class 5 score at idx0: {nms[5,0].max():.4f}, "
+                              f"idx1: {nms[5,1].max():.4f}, idx2: {nms[5,2].max():.4f}, "
+                              f"idx3: {nms[5,3].max():.4f}, idx4: {nms[5,4].max():.4f}")
 
         except KeyboardInterrupt:
             pass
