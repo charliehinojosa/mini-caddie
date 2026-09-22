@@ -74,10 +74,19 @@ def app_callback(element, buffer, user_data):
     if buffer is None:
         return Gst.PadProbeReturn.OK
 
-    # Get detections from on-chip NMS (HAILO_DETECTION objects)
-    detections = hailo.get_roi_from_buffer(buffer).get_objects_typed(
+    # Get ALL detections for debugging
+    all_detections = hailo.get_roi_from_buffer(buffer).get_objects_typed(
         hailo.HAILO_DETECTION
     )
+
+    # Debug: print raw labels every 30 frames
+    if user_data.frame_count % 30 == 0:
+        labels_seen = set()
+        for det in all_detections:
+            labels_seen.add(det.get_label())
+        print(f"  [DEBUG] Frame {frame_idx}: {len(all_detections)} detections, labels: {labels_seen}")
+
+    detections = all_detections
 
     golf_objects = []
     for det in detections:
