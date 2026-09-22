@@ -15,6 +15,12 @@ Usage:
 import os
 import time
 import numpy as np
+import cv2
+from hailo_platform import (
+    HEF, VDevice, InferVStreams, ConfigureParams,
+    HailoStreamInterface, InputVStreamParams, OutputVStreamParams,
+    FormatType,
+)
 
 # ── Golf class labels (index 0 = background, NOT in NMS output) ─────────────
 # NMS output index 0-7 = classes 1-8 from training (background is removed)
@@ -76,13 +82,7 @@ def detect(camera, hef, target, ng, input_params, output_params, input_name, out
 
 
 def main():
-    from hailo_platform import (
-        HEF, VDevice, InferVStreams, ConfigureParams,
-        HailoStreamInterface, InputVStreamParams, OutputVStreamParams,
-        FormatType,
-    )
     from picamera2 import Picamera2
-    import cv2
 
     print("\n" + "=" * 55)
     print("  ⛳ MINI CADDIE CAM")
