@@ -139,10 +139,22 @@ def main():
                         emoji = EMOJI.get(label, "❓")
                         print(f"    {emoji} {label:<16} {conf:.0%}")
                         det_counts[label] = det_counts.get(label, 0) + 1
-                elif frame_count % 30 == 0:
+                elif frame_count % 10 == 0:
                     elapsed = time.time() - start_time
                     fps = frame_count / elapsed
-                    print(f"  [Frame {frame_count}] {fps:.1f} FPS — no detections")
+                    # Debug: dump raw NMS max values per class
+                    with InferVStreams(ng, input_params, output_params, target) as pipe:
+                        frame_resized = cv2.resize(frame, (640, 640))
+                        if frame_resized.shape[2] == 4:
+                            frame_resized = frame_resized[:, :, :3]
+                        input_array = np.expand_dims(frame_resized, axis=0).astype(np.uint8)
+                        r = pipe.infer({input_name: input_array})
+                        nms = r[output_name][0]  # (8, 5, 100)
+                        max_scores = []
+                        for c in range(8):
+                            max_s = nms[c, 4, :].max()
+                            max_scores.append(f"{LABELS[c]}:{max_s:.3f}")
+                        print(f"  [Frame {frame_count}] {fps:.1f} FPS | max scores: {', '.join(max_scores)}")
 
         except KeyboardInterrupt:
             pass
