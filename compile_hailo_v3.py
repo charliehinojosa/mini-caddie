@@ -140,6 +140,15 @@ runner.optimize(calib_data)
 print("Optimization complete!")
 
 # --- 7. Compile to HEF ---
+# Fix: SDKPaths _is_release bug on Colab (dist-packages vs site-packages)
+try:
+    from hailo_sdk_common.paths_manager.paths import SDKPaths
+    paths = SDKPaths()
+    paths._is_release = True
+    print("SDKPaths fix applied!")
+except Exception as e:
+    print(f"SDKPaths fix skipped: {e}")
+
 hef = runner.compile()
 print("Compile complete!")
 
