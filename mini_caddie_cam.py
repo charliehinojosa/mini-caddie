@@ -7,7 +7,9 @@ Filters to 8 golf classes, shows clean overlay, logs detections.
 Usage:
   cd ~/hailo-apps
   source setup_env.sh
-  python ~/mini-caddie/mini_caddie_cam.py --input rpi
+  python ~/mini-caddie/mini_caddie_cam.py --input rpi \
+    --hef-path ~/mini-caddie/mini_caddie_golf_nms.hef \
+    --labels-json ~/mini-caddie/labels.json
 """
 
 import os
@@ -21,8 +23,8 @@ gi.require_version("Gst", "1.0")
 from gi.repository import Gst
 
 import hailo
-from hailo_apps.python.pipeline_apps.detection_simple.detection_simple_pipeline import (
-    GStreamerDetectionSimpleApp,
+from hailo_apps.python.pipeline_apps.detection.detection_pipeline import (
+    GStreamerDetectionApp,
 )
 from hailo_apps.python.core.common.hailo_logger import get_logger
 from hailo_apps.python.core.gstreamer.gstreamer_app import app_callback_class
@@ -41,11 +43,7 @@ GOLF_CLASSES = {
     "player_ready":    {"emoji": "✅", "color": "\033[92m",  "min_conf": 0.40},
 }
 
-# Reset terminal color
 RESET = "\033[0m"
-
-# Labels file path (for hailo-detect integration)
-LABELS_PATH = os.path.expanduser("~/mini-caddie/labels.json")
 
 
 class MiniCaddieCallback(app_callback_class):
@@ -58,7 +56,7 @@ class MiniCaddieCallback(app_callback_class):
         self.last_ball_frame = None
         self.last_ball_conf = None
         self.start_time = time.time()
-        self.fps_log_interval = 100  # print FPS every N frames
+        self.fps_log_interval = 100
 
 
 def app_callback(element, buffer, user_data):
@@ -117,12 +115,6 @@ def app_callback(element, buffer, user_data):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="⛳ Mini Caddie Cam — Golf Detection")
-    parser.add_argument("--input", "-i", default="rpi",
-                        help="Input source: rpi (Pi Camera) or usb (webcam)")
-    args = parser.parse_args()
-
-    # ── Header ──────────────────────────────────────────────────────────────
     print("\n" + "=" * 55)
     print("  ⛳ MINI CADDIE CAM")
     print("  Custom YOLOv8n — 8 golf classes")
@@ -135,9 +127,10 @@ def main():
         print(f"    {cfg['emoji']} {label:<16} min conf: {cfg['min_conf']:.0%}")
     print()
 
-    # ── Run pipeline ────────────────────────────────────────────────────────
+    # GStreamerDetectionApp uses get_pipeline_parser() which adds --hef-path,
+    # --input, --arch, etc. automatically. We also add --labels-json.
     user_data = MiniCaddieCallback()
-    app = GStreamerDetectionSimpleApp(app_callback, user_data)
+    app = GStreamerDetectionApp(app_callback, user_data)
     app.run()
 
     # ── Summary on exit ─────────────────────────────────────────────────────
