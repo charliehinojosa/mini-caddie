@@ -1,162 +1,163 @@
 #!/usr/bin/env python3
 """
-Mini Caddie Cam — Golf-focused live detection with custom YOLOv8n model.
-Uses the NMS-compiled HEF (mini_caddie_golf_nms.hef) for on-chip NMS.
-Filters to 8 golf classes, shows clean overlay, logs detections.
+Mini Caddie Cam — Live golf detection using direct Hailo API.
+Reads camera frames with Picamera2, runs inference on the NMS HEF,
+and prints golf class detections.
+
+NMS output shape: (1, 8, 5, 100) = (batch, classes, 5_vals, max_boxes)
+Each box: [y_min, x_min, y_max, x_max, score] (normalized 0-1)
 
 Usage:
-  cd ~/hailo-apps
-  source setup_env.sh
-  python ~/mini-caddie/mini_caddie_cam.py --input rpi \
-    --hef-path ~/mini-caddie/mini_caddie_golf_nms.hef \
-    --labels-json ~/mini-caddie/labels.json
+  cd ~/hailo-apps && source setup_env.sh
+  python ~/mini-caddie/mini_caddie_cam.py
 """
 
 import os
-os.environ["GST_PLUGIN_FEATURE_RANK"] = "vaapidecodebin:NONE"
-
-import argparse
 import time
+import numpy as np
 
-import gi
-gi.require_version("Gst", "1.0")
-from gi.repository import Gst
+# ── Golf class labels (index 0 = background, NOT in NMS output) ─────────────
+# NMS output index 0-7 = classes 1-8 from training (background is removed)
+LABELS = [
+    "golf_ball",
+    "golf_club",
+    "golf_club_head",
+    "golf_hole",
+    "golf_mat",
+    "person",
+    "player_not_ready",
+    "player_ready",
+]
 
-import hailo
-from hailo_apps.python.pipeline_apps.detection.detection_pipeline import (
-    GStreamerDetectionApp,
-)
-from hailo_apps.python.core.common.hailo_logger import get_logger
-from hailo_apps.python.core.gstreamer.gstreamer_app import app_callback_class
-
-hailo_logger = get_logger(__name__)
-
-# ── Golf class labels (background at index 0 from Hailo compilation) ────────
-GOLF_CLASSES = {
-    "golf_ball":       {"emoji": "⚪", "color": "\033[97m",  "min_conf": 0.30},
-    "golf_club":       {"emoji": "🏌️", "color": "\033[93m",  "min_conf": 0.35},
-    "golf_club_head":  {"emoji": "🔨", "color": "\033[92m",  "min_conf": 0.35},
-    "golf_hole":       {"emoji": "🟤", "color": "\033[33m",  "min_conf": 0.35},
-    "golf_mat":        {"emoji": "🟩", "color": "\033[32m",  "min_conf": 0.35},
-    "person":          {"emoji": "🧑", "color": "\033[96m",  "min_conf": 0.40},
-    "player_not_ready":{"emoji": "🙅", "color": "\033[91m",  "min_conf": 0.40},
-    "player_ready":    {"emoji": "✅", "color": "\033[92m",  "min_conf": 0.40},
+EMOJI = {
+    "golf_ball": "⚪", "golf_club": "🏌️", "golf_club_head": "🔨",
+    "golf_hole": "🟤", "golf_mat": "🟩", "person": "🧑",
+    "player_not_ready": "🙅", "player_ready": "✅",
 }
 
-RESET = "\033[0m"
+MIN_CONF = 0.30
+HEF_PATH = os.path.expanduser("~/mini-caddie/mini_caddie_golf_nms.hef")
 
 
-class MiniCaddieCallback(app_callback_class):
-    """Track golf detections across frames."""
+def detect(camera, hef, target, ng, input_params, output_params, input_name, output_name):
+    """Run one inference frame and return detections."""
+    # Capture frame
+    frame = camera.capture_array()
 
-    def __init__(self):
-        super().__init__()
-        self.frame_count = 0
-        self.detection_counts = {}  # label → total count
-        self.last_ball_frame = None
-        self.last_ball_conf = None
-        self.start_time = time.time()
-        self.fps_log_interval = 100
+    # Resize to 640x640 (HWC, RGB, uint8)
+    import cv2
+    frame_resized = cv2.resize(frame, (640, 640))
+    if frame_resized.shape[2] == 4:  # RGBA → RGB
+        frame_resized = frame_resized[:, :, :3]
+    input_array = np.expand_dims(frame_resized, axis=0).astype(np.uint8)
 
+    # Infer
+    with InferVStreams(ng, input_params, output_params, target) as pipe:
+        results = pipe.infer({input_name: input_array})
+        nms_output = results[output_name]  # (1, 8, 5, 100)
 
-def app_callback(element, buffer, user_data):
-    """Process each frame — filter for golf classes, log stats."""
-    frame_idx = user_data.get_count()
-    user_data.frame_count += 1
-
-    # FPS logging
-    if user_data.frame_count % user_data.fps_log_interval == 0:
-        elapsed = time.time() - user_data.start_time
-        fps = user_data.frame_count / elapsed
-        print(f"\n  📊 {user_data.frame_count} frames | {fps:.1f} FPS | "
-              f"elapsed: {elapsed:.0f}s\n")
-
-    if buffer is None:
-        return Gst.PadProbeReturn.OK
-
-    # Get ALL detections for debugging
-    all_detections = hailo.get_roi_from_buffer(buffer).get_objects_typed(
-        hailo.HAILO_DETECTION
-    )
-
-    # Debug: print raw labels every 30 frames
-    if user_data.frame_count % 30 == 0:
-        labels_seen = set()
-        for det in all_detections:
-            labels_seen.add(det.get_label())
-        print(f"  [DEBUG] Frame {frame_idx}: {len(all_detections)} detections, labels: {labels_seen}")
-
-    detections = all_detections
-
-    golf_objects = []
-    for det in detections:
-        label = det.get_label()
-        confidence = det.get_confidence()
-
-        # Skip background and non-golf labels
-        if label not in GOLF_CLASSES:
-            continue
-
-        class_cfg = GOLF_CLASSES[label]
-        if confidence < class_cfg["min_conf"]:
-            continue
-
-        golf_objects.append((label, confidence, class_cfg))
-        user_data.detection_counts[label] = user_data.detection_counts.get(label, 0) + 1
-
-        if label == "golf_ball":
-            user_data.last_ball_frame = frame_idx
-            user_data.last_ball_conf = confidence
-
-    # Print detections
-    if golf_objects:
-        print(f"  ── Frame {frame_idx} ──")
-        for label, conf, cfg in golf_objects:
-            color = cfg["color"]
-            emoji = cfg["emoji"]
-            print(f"    {emoji} {color}{label:<16}{RESET} {conf:.0%}")
-
-        if user_data.last_ball_frame and user_data.last_ball_frame != frame_idx:
-            frames_ago = frame_idx - user_data.last_ball_frame
-            print(f"    ⚪ Last ball: {frames_ago} frames ago ({user_data.last_ball_conf:.0%})")
-
-    return Gst.PadProbeReturn.OK
+    # Decode NMS output
+    detections = []
+    nms = nms_output[0]  # (8, 5, 100)
+    for cls_idx in range(8):
+        for box_idx in range(100):
+            score = nms[cls_idx, 4, box_idx]
+            if score >= MIN_CONF:
+                y_min = nms[cls_idx, 0, box_idx]
+                x_min = nms[cls_idx, 1, box_idx]
+                y_max = nms[cls_idx, 2, box_idx]
+                x_max = nms[cls_idx, 3, box_idx]
+                detections.append({
+                    "label": LABELS[cls_idx],
+                    "confidence": float(score),
+                    "bbox": [float(y_min), float(x_min), float(y_max), float(x_max)],
+                })
+    return detections, frame
 
 
 def main():
+    from hailo_platform import (
+        HEF, VDevice, InferVStreams, ConfigureParams,
+        HailoStreamInterface, InputVStreamParams, OutputVStreamParams,
+        FormatType,
+    )
+    from picamera2 import Picamera2
+    import cv2
+
     print("\n" + "=" * 55)
     print("  ⛳ MINI CADDIE CAM")
-    print("  Custom YOLOv8n — 8 golf classes")
-    print("  On-chip NMS — live inference")
-    print("  Press Ctrl+C to stop")
-    print("=" * 55)
+    print("  Direct Hailo API — NMS HEF")
+    print("  8 golf classes | Press Ctrl+C to stop")
+    print("=" * 55 + "\n")
 
-    print("\n  Classes:")
-    for label, cfg in GOLF_CLASSES.items():
-        print(f"    {cfg['emoji']} {label:<16} min conf: {cfg['min_conf']:.0%}")
-    print()
+    # ── Init Hailo ──────────────────────────────────────────────────────────
+    hef = HEF(HEF_PATH)
+    target = VDevice()
+    cp = ConfigureParams.create_from_hef(hef, interface=HailoStreamInterface.PCIe)
+    ng = target.configure(hef, cp)[0]
 
-    # GStreamerDetectionApp uses get_pipeline_parser() which adds --hef-path,
-    # --input, --arch, etc. automatically. We also add --labels-json.
-    user_data = MiniCaddieCallback()
-    app = GStreamerDetectionApp(app_callback, user_data)
-    app.run()
+    input_info = hef.get_input_vstream_infos()
+    output_info = hef.get_output_vstream_infos()
+    input_name = input_info[0].name
+    output_name = output_info[0].name
 
-    # ── Summary on exit ─────────────────────────────────────────────────────
-    elapsed = time.time() - user_data.start_time
+    input_params = InputVStreamParams.make_from_network_group(ng)
+    output_params = OutputVStreamParams.make_from_network_group(ng)
+    for p in output_params.values():
+        p.user_buffer_format.type = FormatType.FLOAT32
+
+    activated = ng.activate()
+
+    # ── Init camera ─────────────────────────────────────────────────────────
+    camera = Picamera2()
+    camera.configure(camera.create_preview_configuration(
+        main={"size": (640, 480), "format": "RGB888"}
+    ))
+    camera.start()
+
+    # ── Live loop ───────────────────────────────────────────────────────────
+    frame_count = 0
+    start_time = time.time()
+    det_counts = {}
+
+    with activated:
+        try:
+            while True:
+                frame_count += 1
+                detections, frame = detect(
+                    camera, hef, target, ng,
+                    input_params, output_params,
+                    input_name, output_name
+                )
+
+                # Print detections
+                if detections:
+                    print(f"  ── Frame {frame_count} ───")
+                    for det in detections:
+                        label = det["label"]
+                        conf = det["confidence"]
+                        emoji = EMOJI.get(label, "❓")
+                        print(f"    {emoji} {label:<16} {conf:.0%}")
+                        det_counts[label] = det_counts.get(label, 0) + 1
+                elif frame_count % 30 == 0:
+                    elapsed = time.time() - start_time
+                    fps = frame_count / elapsed
+                    print(f"  [Frame {frame_count}] {fps:.1f} FPS — no detections")
+
+        except KeyboardInterrupt:
+            pass
+        finally:
+            camera.stop()
+
+    # ── Summary ─────────────────────────────────────────────────────────────
+    elapsed = time.time() - start_time
     print("\n" + "=" * 55)
     print("  📊 SESSION SUMMARY")
-    print(f"  Frames: {user_data.frame_count}")
-    print(f"  Duration: {elapsed:.0f}s")
-    if user_data.frame_count > 0:
-        print(f"  Avg FPS: {user_data.frame_count / elapsed:.1f}")
-    print()
-    if user_data.detection_counts:
-        print("  Detections by class:")
-        for label, count in sorted(user_data.detection_counts.items(),
-                                    key=lambda x: -x[1]):
-            cfg = GOLF_CLASSES.get(label, {"emoji": "❓"})
-            print(f"    {cfg['emoji']} {label:<16} {count}")
+    print(f"  Frames: {frame_count} | Duration: {elapsed:.0f}s | FPS: {frame_count/elapsed:.1f}")
+    if det_counts:
+        print("  Detections:")
+        for label, count in sorted(det_counts.items(), key=lambda x: -x[1]):
+            print(f"    {EMOJI.get(label, '❓')} {label:<16} {count}")
     else:
         print("  No golf objects detected.")
     print("=" * 55 + "\n")
