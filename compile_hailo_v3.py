@@ -81,6 +81,9 @@ print("NMS config written!")
 # --- 4. Create and load Hailo model script (.alls) ---
 alls_script = (
     'normalization1 = normalization([0.0, 0.0, 0.0], [255.0, 255.0, 255.0])\n'
+    'change_output_activation(conv42, sigmoid)\n'
+    'change_output_activation(conv53, sigmoid)\n'
+    'change_output_activation(conv63, sigmoid)\n'
     'nms_postprocess("' + nms_config_path + '", meta_arch=yolov8, engine=cpu)\n'
 )
 
