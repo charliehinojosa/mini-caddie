@@ -17,10 +17,7 @@ print("=== Loading .alls ===")
 print(alls)
 runner.load_model_script(alls)
 
-print("")
-print("=== get_detected_nms_config ===")
-nms = runner.get_detected_nms_config('yolov8')
-print(nms)
+print("(skipping get_detected_nms_config - not supported for yolov8)")
 
 hn = runner.get_hn_model()
 print("")
