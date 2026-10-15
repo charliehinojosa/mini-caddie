@@ -19,7 +19,7 @@ runner.load_model_script(alls)
 
 print("")
 print("=== get_detected_nms_config ===")
-nms = runner.get_detected_nms_config()
+nms = runner.get_detected_nms_config('yolov8')
 print(nms)
 
 hn = runner.get_hn_model()
